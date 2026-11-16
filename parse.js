@@ -81,6 +81,16 @@ function normLabel(s) {
 }
 
 function isSpace(ch) { return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v'; }
+// Does `s` end with a blank line (`\n`, optional spaces/tabs, `\n`,
+// optional spaces/tabs)? A manual scan, cheaper than the regex.
+function endsWithBlankLine(s) {
+  let k = s.length;
+  while (k > 0 && (s[k - 1] === ' ' || s[k - 1] === '\t')) k--;
+  if (k === 0 || s[k - 1] !== '\n') return false;
+  k--;
+  while (k > 0 && (s[k - 1] === ' ' || s[k - 1] === '\t')) k--;
+  return k > 0 && s[k - 1] === '\n';
+}
 function isPunctChar(ch) {
   if (ch === undefined || ch === '') return false;
   const code = ch.charCodeAt(0);
@@ -608,25 +618,41 @@ function backpedalUrl(m) {
   return m;
 }
 
-const EMAIL_RE = /^[A-Za-z0-9._+-]+@[A-Za-z0-9-_]+(?:\.[A-Za-z0-9-_]*[A-Za-z0-9])+(?![\w-])/;
-const EMAIL_RE_NOLOOK = /^[A-Za-z0-9._+-]+@[A-Za-z0-9-_]+(?:\.[A-Za-z0-9-_]*[A-Za-z0-9])+/;
-const EMAIL_LOCAL = /[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/;
+// Sticky versions of the extended-autolink patterns: they run on the
+// whole inline string at `lastIndex = i`, so tryUrl never has to slice
+// off the rest of the string (that slice, taken at nearly every
+// character, was the hottest allocation in the parser).
+const PROTO_RE_Y = /(?:mailto|xmpp):[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9-_]+(?:\.[A-Za-z0-9-_]*[A-Za-z0-9])+(?:\/[A-Za-z0-9@.]+)?(?![\w-])/y;
+const WWW_RE_Y = /(?:www\.)(?:[A-Za-z0-9-]+\.?)+[^\s<]*/y;
+const SCHEME_RE_Y = /(?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/(?:[A-Za-z0-9-]+\.?)+[^\s<]*/y;
+const EMAIL_RE_Y = /[A-Za-z0-9._+-]+@[A-Za-z0-9-_]+(?:\.[A-Za-z0-9-_]*[A-Za-z0-9])+(?![\w-])/y;
+const EMAIL_RE_NOLOOK_Y = /[A-Za-z0-9._+-]+@[A-Za-z0-9-_]+(?:\.[A-Za-z0-9-_]*[A-Za-z0-9])+/y;
+// The characters that may appear in an email local part (all ASCII).
+// A table lookup replaces a regex test that ran at nearly every
+// character position.
+const EMAIL_LOCAL_T = new Uint8Array(128);
+for (const ch of "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.!#$%&'*+-/=?^_`{|}~") EMAIL_LOCAL_T[ch.charCodeAt(0)] = 1;
+function isEmailLocalChar(ch) {
+  if (!ch) return false;
+  return isEmailLocalCode(ch.charCodeAt(0));
+}
+function isEmailLocalCode(code) { return code < 128 && EMAIL_LOCAL_T[code] === 1; }
 
 // Try to match an extended autolink (www., scheme://, email, mailto:,
 // xmpp:) starting at `i`. Returns {atom, end} or null.
 function tryUrl(s, i, st, atoms, masked) {
   if (st.inLink) return null;
-  const rest = s.slice(i);
-  const protoRe = /^(?:mailto|xmpp):[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9-_]+(?:\.[A-Za-z0-9-_]*[A-Za-z0-9])+(?:\/[A-Za-z0-9@.]+)?(?![\w-])/;
-  let m = protoRe.exec(rest);
+  PROTO_RE_Y.lastIndex = i;
+  let m = PROTO_RE_Y.exec(s);
   if (m) {
     const text = m[0];
     return { atom: { k: 'l', href: text, title: null, label: null, labelText: text, auto: true }, end: i + text.length };
   }
-  if (rest.startsWith('www.')) {
+  if (s.startsWith('www.', i)) {
     const prev = i === 0 ? '' : s[i - 1];
     if (prev === '' || isSpace(prev) || prev === '*' || prev === '_' || prev === '~' || prev === '(') {
-      const dm = /^(?:www\.)(?:[A-Za-z0-9-]+\.?)+[^\s<]*/.exec(rest);
+      WWW_RE_Y.lastIndex = i;
+      const dm = WWW_RE_Y.exec(s);
       if (dm) {
         const text = backpedalUrl(dm[0]);
         if (text.length > 4) {
@@ -635,14 +661,16 @@ function tryUrl(s, i, st, atoms, masked) {
       }
     }
   }
-  const sc = /^(?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/(?:[A-Za-z0-9-]+\.?)+[^\s<]*/.exec(rest);
+  SCHEME_RE_Y.lastIndex = i;
+  const sc = SCHEME_RE_Y.exec(s);
   if (sc) {
     const text = backpedalUrl(sc[0]);
     return { atom: { k: 'l', href: text, title: null, label: null, labelText: text, auto: true }, end: i + text.length };
   }
   const prev = i === 0 ? '' : s[i - 1];
-  if (EMAIL_LOCAL.test(s[i]) && (prev === '' || !EMAIL_LOCAL.test(prev))) {
-    const em = EMAIL_RE.exec(rest);
+  if (isEmailLocalChar(s[i]) && (prev === '' || !isEmailLocalChar(prev))) {
+    EMAIL_RE_Y.lastIndex = i;
+    const em = EMAIL_RE_Y.exec(s);
     // The lookahead can cut the domain short only because the email
     // is followed by `_` — which is exactly what an emphasis closer
     // looks like. Marked matches the email after the strong is
@@ -654,7 +682,8 @@ function tryUrl(s, i, st, atoms, masked) {
     // literal while `__a _b_ c@x.com__` (debt swallows the middle
     // closer) still matches the email.
     if (atoms) {
-      const em2 = EMAIL_RE_NOLOOK.exec(rest);
+      EMAIL_RE_NOLOOK_Y.lastIndex = i;
+      const em2 = EMAIL_RE_NOLOOK_Y.exec(s);
       if (em2 && (!em || em2[0].length > em[0].length)) {
         const end2 = i + em2[0].length;
         let j = end2;
@@ -900,24 +929,36 @@ function parseInlineAtoms(s, st) {
   const atoms = [];
   const n = s.length;
   let i = 0;
-  let buf = '';
+  // The plain-text run is kept as an index range [bufStart, i) into
+  // the source instead of a string built one character at a time: the
+  // run is sliced once, when it is flushed. `bufStart` is -1 while no
+  // run is open (a flush happens before an atom is consumed, so it
+  // cannot be reset to `i` — the atom's own characters come after).
+  // `bufRaw` is the raw-block flag of the run's first character (it
+  // cannot change mid-run: only a tag atom changes it, and a tag atom
+  // flushes first).
+  let bufStart = -1;
   let bufRaw = false;
   // A delimiter run is masked when the masking above replaced it: it
   // cannot close an emphasis, though it can still open one. Only
   // worth computing when a backtick could start a masking span.
   const masked = (s.includes('`') && (s.includes('*') || s.includes('_') || s.includes('~'))) ? maskInlineText(s) : null;
   const flush = () => {
-    if (buf !== '') { atoms.push({ k: 't', s: buf, raw: bufRaw }); buf = ''; }
+    if (bufStart !== -1) { atoms.push({ k: 't', s: s.slice(bufStart, i), raw: bufRaw }); bufStart = -1; }
   };
   const pushAtom = (a) => { flush(); atoms.push(a); };
   while (i < n) {
-    const c = s[i];
+    // Dispatch on the character code, not a one-character string:
+    // reading `s[i]` allocates at every position, a code does not.
+    // 32 space, 92 backslash, 96 backtick, 60 '<', 91 '[', 33 '!',
+    // 42 '*', 95 '_', 126 '~'.
+    const code = s.charCodeAt(i);
     // Hard break: two or more spaces, or a backslash, before a newline,
     // unless nothing but whitespace follows.
-    if (c === ' ' || c === '\\') {
+    if (code === 32 || code === 92) {
       let isBr = false;
       let brEnd = -1;
-      if (c === ' ') {
+      if (code === 32) {
         let j = i;
         while (j < n && s[j] === ' ') j++;
         if (j - i >= 2 && s[j] === '\n') { isBr = true; brEnd = j + 1; }
@@ -933,15 +974,16 @@ function parseInlineAtoms(s, st) {
           continue;
         }
       }
-      if (c === '\\' && i + 1 < n && ASCII_PUNCT.indexOf(s[i + 1]) !== -1) {
+      if (code === 92 && i + 1 < n && ASCII_PUNCT.indexOf(s[i + 1]) !== -1) {
         pushAtom({ k: 'e', s: s[i + 1] });
         i += 2;
         continue;
       }
-      buf += c; bufRaw = st.inRawBlock; i++;
+      if (bufStart === -1) { bufStart = i; bufRaw = st.inRawBlock; }
+      i++;
       continue;
     }
-    if (c === '`') {
+    if (code === 96) {
       const cs = findCodeSpan(s, i);
       if (cs) { pushAtom({ k: 'c', s: cs.text }); i = cs.end; continue; }
       // A failed code span swallows the whole backtick run as literal
@@ -949,10 +991,11 @@ function parseInlineAtoms(s, st) {
       // attempt is only at the next special character.
       let j = i;
       while (j < n && s[j] === '`') j++;
-      buf += s.slice(i, j); bufRaw = st.inRawBlock; i = j;
+      if (bufStart === -1) { bufStart = i; bufRaw = st.inRawBlock; }
+      i = j;
       continue;
     }
-    if (c === '<') {
+    if (code === 60) {
       const tag = matchInlineTag(s, i);
       if (tag) {
         if (!st.inLink && /^<a /i.test(tag)) st.inLink = true;
@@ -971,30 +1014,32 @@ function parseInlineAtoms(s, st) {
         i += auto.length;
         continue;
       }
-      buf += c; bufRaw = st.inRawBlock; i++;
+      if (bufStart === -1) { bufStart = i; bufRaw = st.inRawBlock; }
+      i++;
       continue;
     }
-    if (c === '[' || (c === '!' && s[i + 1] === '[')) {
+    if (code === 91 || (code === 33 && s.charCodeAt(i + 1) === 91)) {
       const hit = tryLink(s, i, st);
       if (hit) { pushAtom(hit.atom); i = hit.end; continue; }
-      buf += c; bufRaw = st.inRawBlock; i++;
+      if (bufStart === -1) { bufStart = i; bufRaw = st.inRawBlock; }
+      i++;
       continue;
     }
-    if (c === '*' || c === '_' || c === '~') {
+    if (code === 42 || code === 95 || code === 126) {
       let j = i;
-      while (j < n && s[j] === c) j++;
+      while (j < n && s.charCodeAt(j) === code) j++;
       const len = j - i;
-      if (c === '~' && len > 2) { buf += s.slice(i, j); bufRaw = st.inRawBlock; i = j; continue; }
+      if (code === 126 && len > 2) { if (bufStart === -1) { bufStart = i; bufRaw = st.inRawBlock; } i = j; continue; }
       // An escape right before the run is `+` in the masked text
       // marked runs its flanking on, not the escaped character: a
       // `\~` before a `~~` run must not count as "preceded by `~`".
       let prev = i === 0 ? '' : s[i - 1];
-      if (buf === '' && atoms.length > 0 && atoms[atoms.length - 1].k === 'e') prev = '+';
+      if (bufStart === -1 && atoms.length > 0 && atoms[atoms.length - 1].k === 'e') prev = '+';
       const next = j >= n ? '' : s[j];
       const { left, right } = flanking(prev, next);
       let open = false, close = false;
-      if (c === '*') { open = left; close = right; }
-      else if (c === '_') {
+      if (code === 42) { open = left; close = right; }
+      else if (code === 95) {
         open = left && (!right || isPunctChar(prev));
         close = right && (!left || isPunctChar(next));
       } else {
@@ -1004,16 +1049,33 @@ function parseInlineAtoms(s, st) {
       // y is the total run length (kept across split retries); o says
       // the character before this run is the same delimiter.
       const isMasked = masked !== null && masked.slice(i, j) !== s.slice(i, j);
-      pushAtom({ k: 'd', ch: c, len, y: len, o: false, open, close, masked: isMasked });
+      pushAtom({ k: 'd', ch: s[i], len, y: len, o: false, open, close, masked: isMasked });
       i = j;
       continue;
     }
     // Extended autolinks (www., scheme://, email) — only outside links.
-    if (!st.inLink && (c === 'w' || c === 'h' || c === 'H' || c === 'f' || c === 'F' || EMAIL_LOCAL.test(c))) {
-      const hit = tryUrl(s, i, st, atoms, masked);
-      if (hit) { pushAtom(hit.atom); i = hit.end; continue; }
+    // tryUrl is only worth calling where a match can start: a word
+    // start (an email may begin there) or the first letter of a
+    // scheme/www./mailto:/xmpp: prefix. That keeps the per-character
+    // cost to a few cheap checks instead of regexes over the rest of
+    // the string.
+    if (!st.inLink) {
+      // 119 w, 104 h, 72 H, 102 f, 70 F, 109 m, 120 x.
+      const pc = i === 0 ? -1 : s.charCodeAt(i - 1);
+      const wordStart = pc === -1 || !isEmailLocalCode(pc);
+      let maybe = false;
+      if (wordStart) maybe = isEmailLocalCode(code);
+      else if (code === 119) maybe = s.startsWith('www.', i);
+      else if (code === 104 || code === 72 || code === 102 || code === 70) maybe = s[i + 1] === 't' || s[i + 1] === 'T';
+      else if (code === 109) maybe = s.startsWith('mailto:', i);
+      else if (code === 120) maybe = s.startsWith('xmpp:', i);
+      if (maybe) {
+        const hit = tryUrl(s, i, st, atoms, masked);
+        if (hit) { pushAtom(hit.atom); i = hit.end; continue; }
+      }
     }
-    buf += c; bufRaw = st.inRawBlock; i++;
+    if (bufStart === -1) { bufStart = i; bufRaw = st.inRawBlock; }
+    i++;
   }
   flush();
   return resolveDelims(atoms);
@@ -2055,7 +2117,7 @@ function lexList(lines, i, end, links, endsNL) {
     // loose (unless it is the last item); the raw text is the source
     // slice from this item to the next one.
     const rawEnd = lines.slice(itemStart, itemEnd).join('\n') + ((itemEnd < end || endsNL) ? '\n' : '');
-    const pBlank = /\n[ \t]*\n[ \t]*$/.test(rawEnd);
+    const pBlank = endsWithBlankLine(rawEnd);
     const nodes = [];
     const blankGap = lexLines(textLines, links, false, nodes, false, false);
     // Task list item: strip the checkbox marker from the first text.
