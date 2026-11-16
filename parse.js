@@ -81,15 +81,18 @@ function normLabel(s) {
 }
 
 function isSpace(ch) { return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v'; }
-// Does `s` end with a blank line (`\n`, optional spaces/tabs, `\n`,
-// optional spaces/tabs)? A manual scan, cheaper than the regex.
-function endsWithBlankLine(s) {
-  let k = s.length;
-  while (k > 0 && (s[k - 1] === ' ' || s[k - 1] === '\t')) k--;
-  if (k === 0 || s[k - 1] !== '\n') return false;
-  k--;
-  while (k > 0 && (s[k - 1] === ' ' || s[k - 1] === '\t')) k--;
-  return k > 0 && s[k - 1] === '\n';
+// Does the raw text of a list item — lines[a..b) joined by '\n',
+// plus a trailing '\n' when `trailingNL` — end with a blank line
+// (a `\n`, optional spaces/tabs, `\n`, optional spaces/tabs)? Only
+// the last lines can decide that, so no joined string is built.
+// With a trailing newline the last line must be blank and another
+// line must precede it; without one the last two lines must both be
+// blank and a third line must precede them.
+function itemEndsBlank(lines, a, b, trailingNL) {
+  if (b - a < 1) return false;
+  const last = lines[b - 1];
+  if (trailingNL) return b - a >= 2 && isBlankLine(last);
+  return b - a >= 3 && isBlankLine(last) && isBlankLine(lines[b - 2]);
 }
 function isPunctChar(ch) {
   if (ch === undefined || ch === '') return false;
@@ -642,13 +645,21 @@ function isEmailLocalCode(code) { return code < 128 && EMAIL_LOCAL_T[code] === 1
 // xmpp:) starting at `i`. Returns {atom, end} or null.
 function tryUrl(s, i, st, atoms, masked) {
   if (st.inLink) return null;
-  PROTO_RE_Y.lastIndex = i;
-  let m = PROTO_RE_Y.exec(s);
-  if (m) {
-    const text = m[0];
-    return { atom: { k: 'l', href: text, title: null, label: null, labelText: text, auto: true }, end: i + text.length };
+  // Each pattern can only start on its own first letter, so the
+  // regexes are only run for those letters (109 m, 120 x, 119 w,
+  // 104 h, 72 H, 102 f, 70 F). tryUrl is called at most word starts,
+  // so without these guards every word paid for three regex calls
+  // that fail on their first character.
+  const c0 = s.charCodeAt(i);
+  if (c0 === 109 || c0 === 120) {
+    PROTO_RE_Y.lastIndex = i;
+    let m = PROTO_RE_Y.exec(s);
+    if (m) {
+      const text = m[0];
+      return { atom: { k: 'l', href: text, title: null, label: null, labelText: text, auto: true }, end: i + text.length };
+    }
   }
-  if (s.startsWith('www.', i)) {
+  if (c0 === 119 && s.startsWith('www.', i)) {
     const prev = i === 0 ? '' : s[i - 1];
     if (prev === '' || isSpace(prev) || prev === '*' || prev === '_' || prev === '~' || prev === '(') {
       WWW_RE_Y.lastIndex = i;
@@ -661,14 +672,23 @@ function tryUrl(s, i, st, atoms, masked) {
       }
     }
   }
-  SCHEME_RE_Y.lastIndex = i;
-  const sc = SCHEME_RE_Y.exec(s);
-  if (sc) {
-    const text = backpedalUrl(sc[0]);
-    return { atom: { k: 'l', href: text, title: null, label: null, labelText: text, auto: true }, end: i + text.length };
+  if (c0 === 104 || c0 === 72 || c0 === 102 || c0 === 70) {
+    SCHEME_RE_Y.lastIndex = i;
+    const sc = SCHEME_RE_Y.exec(s);
+    if (sc) {
+      const text = backpedalUrl(sc[0]);
+      return { atom: { k: 'l', href: text, title: null, label: null, labelText: text, auto: true }, end: i + text.length };
+    }
   }
   const prev = i === 0 ? '' : s[i - 1];
   if (isEmailLocalChar(s[i]) && (prev === '' || !isEmailLocalChar(prev))) {
+    // Cheap pre-check: an email needs an '@' after the local part.
+    // Scan forward over email-local characters; if no '@' follows,
+    // the regex cannot match and is not run at all.
+    let k = i;
+    const n = s.length;
+    while (k < n && isEmailLocalCode(s.charCodeAt(k))) k++;
+    if (s[k] !== '@') return null;
     EMAIL_RE_Y.lastIndex = i;
     const em = EMAIL_RE_Y.exec(s);
     // The lookahead can cut the domain short only because the email
@@ -2115,16 +2135,16 @@ function lexList(lines, i, end, links, endsNL) {
     }
     // An item whose raw text ends with a blank line makes the list
     // loose (unless it is the last item); the raw text is the source
-    // slice from this item to the next one.
-    const rawEnd = lines.slice(itemStart, itemEnd).join('\n') + ((itemEnd < end || endsNL) ? '\n' : '');
-    const pBlank = endsWithBlankLine(rawEnd);
+    // slice from this item to the next one. Only the last lines can
+    // decide that, so no joined string is built.
+    const pBlank = itemEndsBlank(lines, itemStart, itemEnd, itemEnd < end || endsNL);
     const nodes = [];
     const blankGap = lexLines(textLines, links, false, nodes, false, false);
     // Task list item: strip the checkbox marker from the first text.
+    // The marker can only be on the first line, so only that is read.
     let checked = null;
     if (textLines.length > 0) {
-      const firstText = textLines.join('\n');
-      const tm = /^\[([ xX])\][ \t]+\S/.exec(firstText);
+      const tm = /^\[([ xX])\][ \t]+\S/.exec(textLines[0]);
       if (tm && nodes.length > 0 && (nodes[0].k === 'text' || nodes[0].k === 'para')) {
         checked = tm[1] !== ' ';
         nodes[0].x = nodes[0].x.replace(/^\[[ xX]\][ \t]+/, '');
