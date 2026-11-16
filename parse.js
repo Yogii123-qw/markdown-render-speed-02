@@ -944,6 +944,12 @@ function maskInlineText(s) {
     (m, g1, g2) => { const o = g2 ? g2.length : 0; return m.slice(0, o) + '[' + 'a'.repeat(m.length - o - 2) + ']'; });
 }
 
+// The next position where the inline loop can do anything: a
+// special character (space, backslash, backtick, '<', '[', '!', '*',
+// '_', '~'), a URL prefix, or an '@' (whose email starts at the word
+// start before it).
+const NEXT_INTEREST_RE = /[ \\`<\[[*!_~!]|www\.|[hH][tT][tT][pP][sS]?:\/\/|[fF][tT][pP]:\/\/|mailto:|xmpp:|@/g;
+
 // Tokenise one inline string into atoms (no rendering yet).
 function parseInlineAtoms(s, st) {
   const atoms = [];
@@ -1094,8 +1100,23 @@ function parseInlineAtoms(s, st) {
         if (hit) { pushAtom(hit.atom); i = hit.end; continue; }
       }
     }
+    // Plain character: the URL/email check above already failed for
+    // this position, so the rest of the plain run is jumped over in
+    // one step — one regex scan finds the next position where
+    // something can happen instead of one iteration per character.
+    // An '@' stops the run at the word start before it (clamped to
+    // just after here, so a word that started before this run is
+    // never jumped back to).
     if (bufStart === -1) { bufStart = i; bufRaw = st.inRawBlock; }
-    i++;
+    NEXT_INTEREST_RE.lastIndex = i + 1;
+    const nm = NEXT_INTEREST_RE.exec(s);
+    let j = nm ? nm.index : n;
+    if (nm && nm[0] === '@') {
+      let w = j;
+      while (w > i + 1 && isEmailLocalCode(s.charCodeAt(w - 1))) w--;
+      j = w;
+    }
+    i = j;
   }
   flush();
   return resolveDelims(atoms);
