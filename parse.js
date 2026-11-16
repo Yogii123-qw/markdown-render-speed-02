@@ -368,15 +368,17 @@ function parseBracket(s, i) {
     const c = s[j];
     if (c === '\\') { j += 2; continue; }
     if (c === '`') {
-      // A code span in a label needs a closing run (the two runs need
-      // not match in length); without one, a run right before `]`
-      // still belongs to the label, and anything else ends the label
-      // (and so the link) here.
-      const end = skipLabelCodeSpan(s, j);
-      if (end !== -1) { j = end; continue; }
+      // A run of two or more backticks right before `]` is literal
+      // label text (marked's label pattern has a dedicated alternative
+      // for exactly that): it is not a code span opener, even when a
+      // later backtick run exists. A single backtick before `]` is a
+      // code span opener: without a closing run the label (and so the
+      // link) ends here.
       let k = 0;
       while (j + k < n && s[j + k] === '`') k++;
-      if (s[j + k] === ']') { j += k; continue; }
+      if (k >= 2 && s[j + k] === ']') { j += k; continue; }
+      const end = skipLabelCodeSpan(s, j);
+      if (end !== -1) { j = end; continue; }
       return null;
     }
     if (c === '[') depth++;
