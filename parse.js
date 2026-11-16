@@ -983,7 +983,11 @@ function parseInlineAtoms(s, st) {
       while (j < n && s[j] === c) j++;
       const len = j - i;
       if (c === '~' && len > 2) { buf += s.slice(i, j); bufRaw = st.inRawBlock; i = j; continue; }
-      const prev = i === 0 ? '' : s[i - 1];
+      // An escape right before the run is `+` in the masked text
+      // marked runs its flanking on, not the escaped character: a
+      // `\~` before a `~~` run must not count as "preceded by `~`".
+      let prev = i === 0 ? '' : s[i - 1];
+      if (buf === '' && atoms.length > 0 && atoms[atoms.length - 1].k === 'e') prev = '+';
       const next = j >= n ? '' : s[j];
       const { left, right } = flanking(prev, next);
       let open = false, close = false;
@@ -1649,7 +1653,12 @@ function collectRun(lines, i, end, mode, endsNL) {
   while (j < end) {
     const line = lines[j];
     if (j > start) {
-      if (isBlankAt(lines, j, end, endsNL)) break;
+      // In text mode (a list item, lexed with state.top false) a
+      // whitespace-only line always ends the run: marked's text token
+      // is one line and the rest becomes a space token, even at the
+      // end of the text where no newline follows. In paragraph mode
+      // the paragraph regex keeps such a trailing line.
+      if (isBlankAt(lines, j, end, endsNL) || (mode === 'text' && isBlankLine(line))) break;
       const { cols, idx } = lineIndent(line);
       const s = line.slice(idx);
       if (cols <= 3) {
@@ -1722,7 +1731,10 @@ function lexLines(lines, links, top, nodes, cont, endsNL) {
   };
   while (i < end) {
     const line = lines[i];
-    if (isBlankAt(lines, i, end, endsNL)) {
+    // Outside the top level (a list item) a whitespace-only line is
+    // blank even at the end of the text: it becomes a space token
+    // there, never a text run of its own.
+    if (isBlankAt(lines, i, end, endsNL) || (!top && isBlankLine(line))) {
       i++;
       gapBlanks++;
       if (nodes.length > 0) pendingGap = true;
