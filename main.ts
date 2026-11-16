@@ -1,18 +1,28 @@
-// Entry driver: load every case from the input directory, render each
-// one on its own through parse(), and store the resulting HTML
-// strings, in order, in the output directory. The harness runs this
-// file as `node /bot/main.ts` on Node 22.
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+// Harness driver (run by the grader as `node /bot/main.ts` on
+// Node 22): read the case list, render every Markdown input with
+// the local parser, and write the HTML strings back out in the
+// same order. Each case is rendered independently, so no state
+// leaks from one document into the next.
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from './parse.js';
 
-const inputDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
-const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+type CaseRow = { id: string; markdown: string };
 
-const raw = readFileSync(join(inputDir, 'cases.json'), 'utf8');
-const cases = JSON.parse(raw) as { id: string; markdown: string }[];
+function run(): void {
+  const sourceDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
+  const targetDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-const rendered = cases.map((entry) => parse(entry.markdown));
+  const payload = readFileSync(join(sourceDir, 'cases.json'), 'utf8');
+  const rows = JSON.parse(payload) as CaseRow[];
 
-mkdirSync(outputDir, { recursive: true });
-writeFileSync(join(outputDir, 'html.json'), JSON.stringify(rendered));
+  const html: string[] = new Array(rows.length);
+  for (let k = 0; k < rows.length; k++) {
+    html[k] = parse(rows[k].markdown);
+  }
+
+  mkdirSync(targetDir, { recursive: true });
+  writeFileSync(join(targetDir, 'html.json'), JSON.stringify(html));
+}
+
+run();
